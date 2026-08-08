@@ -78,38 +78,40 @@ node bot.js      # or: npm start
 first when passwordless sudo allows it. Use it on a server, use `node bot.js`
 locally.
 
-## Node on a server (for systemd)
+## Deploying to a server
 
-`systemd-setup.sh` bakes the path of whatever `node` it finds into the unit
-file, and the service runs as the `waterfilter` user. A Node installed by nvm
-lives under *your* home directory, which that user usually cannot read, so
-install Node system-wide instead:
+Clone as root and run the setup script. It does the rest.
+
+```sh
+sudo git clone <this repo> /opt/waterfilter
+cd /opt/waterfilter
+sudo ./systemd-setup.sh      # stops here the first time, asking for the token
+sudo $EDITOR .env            # fill in DISCORD_TOKEN
+sudo ./systemd-setup.sh      # this time it starts the service
+```
+
+`systemd-setup.sh` is safe to re-run, and each run:
+
+- tears down any earlier install first: stops and disables the service, clears a
+  failed state, and deletes the unit file and its drop-in directory
+- creates the `waterfilter` system account and group if they are missing
+- finds node, preferring `/usr/bin` or `/usr/local/bin` over anything on root's
+  PATH, and copies the binary somewhere shared if the service account cannot
+  reach it (see 203/EXEC below)
+- runs `npm ci --omit=dev` if `node_modules` is missing
+- creates `.env` from `.env.example`, and refuses to go on until it has a token
+- hands the whole directory to the service account and locks `.env` to it
+- writes the unit, enables it, starts it, and follows the journal
+
+Ctrl+C at the end stops watching the log, it does not stop the bot.
+
+Node still has to exist on the machine. If it does not:
 
 ```sh
 # Debian/Ubuntu, current LTS
 curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
 sudo apt-get install -y nodejs
 ```
-
-Then deploy:
-
-```sh
-sudo git clone <this repo> /opt/waterfilter
-sudo useradd --system --home /opt/waterfilter waterfilter
-sudo chown -R waterfilter:waterfilter /opt/waterfilter
-cd /opt/waterfilter
-sudo -u waterfilter npm ci --omit=dev
-sudo -u waterfilter cp .env.example .env
-sudo -u waterfilter $EDITOR .env    # add the token
-sudo ./systemd-setup.sh
-```
-
-`systemd-setup.sh` hands the directory to the `waterfilter` user, locks `.env`
-down to that user, writes the unit, enables it, starts it, and then follows the
-journal. Ctrl+C stops watching the log, it does not stop the bot.
-
-The earlier `chown` is still needed because `npm ci` runs as `waterfilter`
-before the script does.
 
 ## Starting and stopping the service
 
@@ -152,3 +154,27 @@ sudo -u waterfilter git pull
 sudo -u waterfilter npm ci --omit=dev   # only if dependencies changed
 sudo systemctl restart waterfilter
 ```
+
+## status=203/EXEC
+
+```
+Failed to execute /root/.nvm/versions/node/v24.19.0/bin/node: Permission denied
+waterfilter.service: Main process exited, code=exited, status=203/EXEC
+```
+
+The unit is pointing at a node that nvm installed into a home directory. The
+service runs as `waterfilter`, which cannot read `/root`, so it never gets as
+far as running the bot.
+
+Re-running the setup script fixes this. It notices the service account cannot
+reach that interpreter and copies the binary to `/usr/local/bin/node`, which
+works because a node binary is self-contained:
+
+```sh
+cd /opt/waterfilter
+sudo ./systemd-setup.sh
+```
+
+That copy is then yours to maintain. Installing node from your package manager
+instead is tidier long term, and the script prefers `/usr/bin/node` over both
+nvm and its own copy on later runs.

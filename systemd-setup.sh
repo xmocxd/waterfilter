@@ -1,46 +1,107 @@
 #!/usr/bin/env bash
-# Install the bot as a systemd service and follow its log. Run once, as root.
+# Set the bot up as a systemd service and follow its log. Run as root from a
+# checkout in /opt/waterfilter. Creates the service account, installs
+# dependencies, fixes ownership, writes the unit and starts it.
 set -euo pipefail
 
 unit=/etc/systemd/system/waterfilter.service
 root=/opt/waterfilter
+user=waterfilter
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run as root: sudo $0" >&2
     exit 1
 fi
-
-# Restart=always turns any of these into a crash loop rather than an error.
-if ! id waterfilter >/dev/null 2>&1; then
-    echo "No waterfilter user. Create one: useradd --system --home $root waterfilter" >&2
+if [ ! -f "$root/bot.js" ]; then
+    echo "No $root/bot.js. Clone the repo to $root first." >&2
     exit 1
 fi
-node=$(command -v node || true)
+
+# Tear down anything left by an earlier attempt. A unit with a stale ExecStart,
+# a failed state that blocks starting, a masking symlink or a forgotten drop-in
+# would all survive a plain rewrite of the unit file. None of this has to
+# succeed: on a first install there is nothing to remove.
+echo "clearing any previous install"
+systemctl stop waterfilter 2>/dev/null || true
+systemctl disable waterfilter 2>/dev/null || true
+systemctl reset-failed waterfilter 2>/dev/null || true
+rm -f "$unit"
+rm -rf "$unit.d"
+systemctl daemon-reload
+
+# nvm keeps node under a home directory that other users cannot read, so prefer
+# a system-wide one even when root's own PATH points at nvm.
+node=
+for candidate in /usr/local/bin/node /usr/bin/node "$(command -v node || true)"; do
+    if [ -x "$candidate" ]; then
+        node=$candidate
+        break
+    fi
+done
 if [ -z "$node" ]; then
-    echo "node is not on PATH. Install it system-wide, see INSTALL.md." >&2
-    exit 1
-fi
-if [ ! -d "$root/node_modules" ]; then
-    echo "No dependencies at $root/node_modules. Run: npm ci --omit=dev" >&2
-    exit 1
-fi
-if [ ! -f "$root/.env" ]; then
-    echo "No $root/.env. Copy .env.example to .env and add the bot token." >&2
+    echo "No node found. Install it, see INSTALL.md." >&2
     exit 1
 fi
 
-# The service runs as waterfilter, so that user has to own what it runs from.
-# useradd picks the group name, so ask rather than assume it matches the user.
-group=$(id -gn waterfilter)
-chown -R waterfilter:"$group" "$root"
+if ! id "$user" >/dev/null 2>&1; then
+    shell=/usr/sbin/nologin
+    [ -x "$shell" ] || shell=/sbin/nologin
+    [ -x "$shell" ] || shell=/bin/false
+    groupadd --system "$user" 2>/dev/null || true
+    useradd --system --gid "$user" --home-dir "$root" --shell "$shell" "$user"
+    echo "created the $user account"
+fi
+# useradd does not always name the group after the user, and a Group= that does
+# not exist stops the unit before it starts.
+group=$(id -gn "$user")
+
+# An interpreter the service account cannot reach fails as an opaque 203/EXEC,
+# which is what a node under /root looks like from another account. The binary
+# is self-contained, so a copy somewhere shared is enough.
+copy_node=false
+case $node in
+    /root/*|/home/*) copy_node=true ;;
+esac
+if command -v runuser >/dev/null 2>&1 && ! runuser -u "$user" -- test -x "$node"; then
+    copy_node=true
+fi
+if [ "$copy_node" = true ] && [ "$node" != /usr/local/bin/node ]; then
+    cp "$node" /usr/local/bin/node
+    chmod 755 /usr/local/bin/node
+    echo "copied $node to /usr/local/bin/node, $user could not reach the original"
+    node=/usr/local/bin/node
+fi
+
+# Installed as root, because npm may live under nvm too. The chown below hands
+# the result over to the service account.
+if [ ! -d "$root/node_modules" ]; then
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "No npm found, cannot install dependencies. See INSTALL.md." >&2
+        exit 1
+    fi
+    echo "installing dependencies"
+    (cd "$root" && npm ci --omit=dev)
+fi
+
+if [ ! -f "$root/.env" ] && [ -f "$root/.env.example" ]; then
+    cp "$root/.env.example" "$root/.env"
+    echo "created $root/.env from .env.example"
+fi
+# Restart=always would turn a missing token into a crash loop rather than an error.
+if ! grep -qE '^[[:space:]]*DISCORD_TOKEN=[^[:space:]]' "$root/.env" 2>/dev/null; then
+    echo "No token in $root/.env. Add DISCORD_TOKEN=... and run this again." >&2
+    exit 1
+fi
+
+chown -R "$user":"$group" "$root"
 # The token lives in .env, so keep it off limits to everyone else.
 chmod 600 "$root/.env"
-echo "chowned $root to waterfilter:$group"
+echo "chowned $root to $user:$group"
 
 # A hand-started bot keeps its gateway session, so starting the service on top
-# of one leaves two bots answering every command.
-running=$(systemctl show -p MainPID --value waterfilter 2>/dev/null || echo 0)
-strays=$(pgrep -f 'node bot.js' | grep -vx "${running:-0}" || true)
+# of one leaves two bots answering every command. The service itself was stopped
+# above, so anything still running was started outside systemd.
+strays=$(pgrep -f 'node bot.js' || true)
 if [ -n "$strays" ]; then
     echo "The bot is already running outside systemd:" >&2
     ps -o pid=,user=,args= -p "$(echo "$strays" | tr '\n' ',')" >&2
@@ -56,7 +117,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=waterfilter
+User=$user
 Group=$group
 WorkingDirectory=$root
 ExecStart=$node $root/bot.js
