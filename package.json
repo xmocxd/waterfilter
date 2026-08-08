@@ -2,15 +2,17 @@
   "name": "waterfilter",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "bot.js",
   "scripts": {
+    "start": "node bot.js",
     "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "engines": {
+    "node": ">=20.12.0"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "body-parser": "^1.19.2",
-    "eris": "^0.16.1",
-    "express": "^4.17.3"
+    "eris": "^0.18.0"
   }
 }
