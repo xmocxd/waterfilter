@@ -101,17 +101,54 @@ cd /opt/waterfilter
 sudo -u waterfilter npm ci --omit=dev
 sudo -u waterfilter cp .env.example .env
 sudo -u waterfilter $EDITOR .env    # add the token
-sudo chmod 600 .env
 sudo ./systemd-setup.sh
 ```
 
-`systemd-setup.sh` writes the unit, enables it, starts it, and then follows the
+`systemd-setup.sh` hands the directory to the `waterfilter` user, locks `.env`
+down to that user, writes the unit, enables it, starts it, and then follows the
 journal. Ctrl+C stops watching the log, it does not stop the bot.
 
-Afterwards:
+The earlier `chown` is still needed because `npm ci` runs as `waterfilter`
+before the script does.
+
+## Starting and stopping the service
+
+Once the unit is installed, the bot is managed entirely through systemd.
 
 ```sh
+sudo systemctl start waterfilter      # connect
+sudo systemctl stop waterfilter       # disconnect, stays stopped
+sudo systemctl restart waterfilter    # pick up code or .env changes
+sudo systemctl status waterfilter     # running? since when? last few log lines
+```
+
+The unit sets `Restart=always`, so systemd brings the bot back after a crash or
+a dropped connection. `stop` is the only thing that keeps it down — killing the
+process by hand just triggers a restart ten seconds later.
+
+Boot behaviour is separate from the running state:
+
+```sh
+sudo systemctl enable waterfilter     # start on boot (systemd-setup.sh does this)
+sudo systemctl disable waterfilter    # do not start on boot, leaves it running now
+```
+
+Logs go to the journal, since the bot only writes to stdout and stderr:
+
+```sh
+journalctl -u waterfilter -f          # follow, Ctrl+C stops watching only
+journalctl -u waterfilter -n 100      # last 100 lines
+journalctl -u waterfilter --since '1 hour ago'
+```
+
+The channel list the bot prints on connect is in there, so `journalctl -u
+waterfilter | grep '#'` is a quick way to see where it ended up.
+
+To deploy a change:
+
+```sh
+cd /opt/waterfilter
+sudo -u waterfilter git pull
+sudo -u waterfilter npm ci --omit=dev   # only if dependencies changed
 sudo systemctl restart waterfilter
-sudo systemctl status waterfilter
-journalctl -u waterfilter -f
 ```

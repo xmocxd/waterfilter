@@ -29,6 +29,14 @@ if [ ! -f "$root/.env" ]; then
     exit 1
 fi
 
+# The service runs as waterfilter, so that user has to own what it runs from.
+# useradd picks the group name, so ask rather than assume it matches the user.
+group=$(id -gn waterfilter)
+chown -R waterfilter:"$group" "$root"
+# The token lives in .env, so keep it off limits to everyone else.
+chmod 600 "$root/.env"
+echo "chowned $root to waterfilter:$group"
+
 # A hand-started bot keeps its gateway session, so starting the service on top
 # of one leaves two bots answering every command.
 running=$(systemctl show -p MainPID --value waterfilter 2>/dev/null || echo 0)
@@ -49,7 +57,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=waterfilter
-Group=waterfilter
+Group=$group
 WorkingDirectory=$root
 ExecStart=$node $root/bot.js
 Restart=always
